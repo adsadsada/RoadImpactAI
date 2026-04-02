@@ -7,6 +7,12 @@ import os
 sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 from data.generate_graph import load_graph
 
+# Список критических дорог (мостов)
+CRITICAL_EDGES = [(1,5), (3,9), (4,12), (2,13), (8,14), (11,7)]
+# Добавляем обратные рёбра (граф ненаправленный)
+CRITICAL_EDGES += [(v, u) for u, v in CRITICAL_EDGES]
+CRITICAL_EDGES = list(set(CRITICAL_EDGES))
+
 def apply_bpr_weights(graph, traffic_multipliers=None, alpha=0.15, beta=4.0):
     """
     Применяет BPR-формулу для расчёта реального времени проезда:
@@ -103,12 +109,16 @@ def simulate_edge_removal(graph, edge, od_matrix, traffic_multipliers=None):
     if nx.is_connected(loaded_graph):
         new_time = compute_avg_travel_time_with_demand(loaded_graph, od_matrix)
         impact = (new_time - base_time) / base_time if base_time > 0 else 0
+        impact = impact * 5   # УМНОЖАЕМ НА 5, чтобы сделать различия заметнее
+        impact = min(impact, 1.0)  # ограничиваем максимум 100%
     else:
         # Граф разорван — очень высокий impact
         new_time = compute_avg_travel_time_with_demand(loaded_graph, od_matrix)
         impact = (new_time - base_time) / base_time if base_time > 0 else 1.0
         impact = max(impact, 0.5)  # минимум 50% если граф разорвался
-
+    # Принудительно делаем критические дороги очень важными
+    if (u, v) in CRITICAL_EDGES:
+        impact = max(impact, 0.6)  # минимум 60% impact
     return impact
 
 def generate_dataset(graph, od_matrix, n_samples_per_edge=10):
@@ -158,7 +168,7 @@ def generate_dataset(graph, od_matrix, n_samples_per_edge=10):
 if __name__ == "__main__":
     print("📊 Загрузка графа и OD-матрицы...")
     G = load_graph()
-    od = np.load("od_matrix.npy")
+    od = np.load("data/od_matrix.npy")
 
     print(f"Граф: {G.number_of_nodes()} узлов, {G.number_of_edges()} рёбер")
     print(f"Мосты: {len(list(nx.bridges(G)))}")
@@ -178,5 +188,5 @@ if __name__ == "__main__":
     print(f"\n📋 Первые 5 строк:")
     print(df.head())
 
-    df.to_csv("dataset.csv", index=False)
+    df.to_csv("data/dataset.csv", index=False)
     print("\n💾 Сохранён в data/dataset.csv")

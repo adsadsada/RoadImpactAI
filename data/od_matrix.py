@@ -65,5 +65,6 @@ if __name__ == "__main__":
     print(f"   Среднее: {od[od > 0].mean():.1f} поездок на маршрут")
     
     # сохраняем
-    np.save("od_matrix.npy", od)
+    os.makedirs("data", exist_ok=True)
+    np.save("data/od_matrix.npy", od)
     print(f"💾 Сохранена в data/od_matrix.npy")
