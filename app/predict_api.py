@@ -12,12 +12,10 @@ import argparse
 import pickle
 import numpy as np
 
-# добавляем путь к корневой папке
 sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 from data.generate_graph import load_graph
-from data.generate_dataset import compute_avg_travel_time_with_demand, calculate_edge_features
+from data.generate_dataset import compute_avg_travel_time_with_demand, calculate_edge_features, apply_bpr_weights
 
-# глобальные объекты
 _MODEL = None
 _GRAPH = None
 _OD_MATRIX = None
@@ -25,16 +23,16 @@ _OD_MATRIX = None
 def load_artifacts():
     """Загружает модель, граф и OD-матрицу"""
     global _MODEL, _GRAPH, _OD_MATRIX
-    
+
     if _MODEL is None:
         with open("model/random_forest.pkl", 'rb') as f:
             _MODEL = pickle.load(f)
         print("✅ Модель загружена")
-    
+
     if _GRAPH is None:
         _GRAPH = load_graph()
         print(f"✅ Граф загружен: {_GRAPH.number_of_nodes()} узлов, {_GRAPH.number_of_edges()} рёбер")
-    
+
     if _OD_MATRIX is None:
         try:
             _OD_MATRIX = np.load("data/od_matrix.npy")
@@ -42,7 +40,7 @@ def load_artifacts():
         except:
             print("⚠️ OD-матрица не найдена")
             _OD_MATRIX = None
-    
+
     return _MODEL, _GRAPH, _OD_MATRIX
 
 def predict_road_impact(u, v):
@@ -50,24 +48,21 @@ def predict_road_impact(u, v):
     Предсказывает impact удаления дороги между узлами u и v
     """
     model, graph, od_matrix = load_artifacts()
-    
-    # проверяем, существует ли дорога
+
     if not graph.has_edge(u, v):
         return {
             'error': f'Дорога {u}→{v} не существует',
             'impact': None
         }
-    
-    # рассчитываем признаки
+
     features = calculate_edge_features(graph, (u, v), od_matrix)
-    
-    # текущее среднее время
+
     if od_matrix is not None:
-        current_time = compute_avg_travel_time_with_demand(graph, od_matrix)
+        loaded_graph = apply_bpr_weights(graph)
+        current_time = compute_avg_travel_time_with_demand(loaded_graph, od_matrix)
     else:
         current_time = 0
-    
-    # предсказание
+
     features_array = np.array([[
         features['traffic'],
         features['capacity'],
@@ -75,21 +70,25 @@ def predict_road_impact(u, v):
         features['centrality'],
         features['alternatives']
     ]])
-    
+
     impact = model.predict(features_array)[0]
+    impact = max(impact, 0.0)  # impact не может быть отрицательным
     impact_percent = impact * 100
-    
-    # рекомендация
-    if impact < 0.1:
+
+    # Обновлённые пороги на основе реального распределения данных
+    if impact < 0.05:
         recommendation = "✅ НЕ критична — можно перепрофилировать"
         suggestion = "парк/пешеходная зона/велодорожка"
-    elif impact < 0.2:
-        recommendation = "⚠️ Осторожно — требует анализа"
+    elif impact < 0.15:
+        recommendation = "⚠️ Умеренно важна — требует анализа"
         suggestion = "сужение проезжей части/расширение тротуаров"
+    elif impact < 0.3:
+        recommendation = "🔶 Важная дорога — изменения рискованны"
+        suggestion = "только косметические изменения"
     else:
         recommendation = "❌ Критична — не рекомендуется изменять"
-        suggestion = "оставить как есть"
-    
+        suggestion = "оставить как есть, дорога является ключевой связью"
+
     return {
         'impact': float(impact),
         'impact_percent': round(impact_percent, 1),
@@ -109,28 +108,28 @@ def main():
     parser.add_argument('--from', dest='u', type=int, help='Начальный узел')
     parser.add_argument('--to', dest='v', type=int, help='Конечный узел')
     parser.add_argument('--list-edges', action='store_true', help='Показать все дороги')
-    
+
     args = parser.parse_args()
-    
+
     model, graph, _ = load_artifacts()
-    
+
     if args.list_edges:
         print("\n📋 Доступные дороги:")
         for u, v in graph.edges():
             print(f"   {u} → {v}")
         return
-    
+
     if args.u is None or args.v is None:
         print("❌ Укажи дорогу: python app/predict_api.py --from 0 --to 1")
         print("   Или посмотри все: python app/predict_api.py --list-edges")
         return
-    
+
     result = predict_road_impact(args.u, args.v)
-    
+
     if 'error' in result:
         print(f"\n❌ {result['error']}")
         return
-    
+
     print("\n" + "="*50)
     print(f"📊 Анализ дороги {args.u} → {args.v}")
     print("="*50)
