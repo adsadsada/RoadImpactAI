@@ -10,14 +10,27 @@ import sys
 import os
 import argparse
 import pickle
+import hashlib
 import numpy as np
 import networkx as nx
 
 sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
-_MODEL  = None
-_GRAPH  = None
-_OD     = None
+_MODEL = None
+_GRAPH = None
+_OD = None
+
+TIME_COEFF = 1.3
+
+IMPACT_WEIGHTS = {
+    "model": 0.35,
+    "traffic": 0.18,
+    "centrality": 0.20,
+    "alternatives": 0.12,
+    "capacity": 0.07,
+    "free_flow_time": 0.04,
+    "bridge": 0.04,
+}
 
 
 def load_artifacts():
@@ -54,16 +67,68 @@ def load_artifacts():
     return _MODEL, _GRAPH, _OD
 
 
+def first_edge_data(graph, u, v):
+    data = graph.get_edge_data(u, v, default={})
+    if not isinstance(data, dict):
+        return {}
+    if any(key in data for key in (
+        "geometry", "weight", "capacity", "length", "name", "osmid"
+    )):
+        return data
+    for value in data.values():
+        if isinstance(value, dict):
+            return value
+    return data
+
+
+def normalize(value, low, high):
+    try:
+        number = float(value)
+    except (TypeError, ValueError):
+        return 0.0
+    if high <= low:
+        return 0.0
+    return float(np.clip((number - low) / (high - low), 0.0, 1.0))
+
+
+def clamp01(value):
+    try:
+        return float(np.clip(float(value), 0.0, 1.0))
+    except (TypeError, ValueError):
+        return 0.0
+
+
+def stable_traffic_multiplier(u, v):
+    key = f"{u}->{v}".encode("utf-8")
+    seed = int(hashlib.sha256(key).hexdigest()[:16], 16) % (2 ** 32)
+    rng = np.random.default_rng(seed)
+    return float(rng.uniform(0.45, 1.65) * TIME_COEFF)
+
+
+def calculate_adjusted_impact(model_impact, traffic, capacity, fft, cent, alts, is_crit):
+    scores = {
+        "model": clamp01(model_impact),
+        "traffic": normalize(traffic, 0.40, 2.30),
+        "centrality": normalize(cent, 0.00, 0.12),
+        "alternatives": 1.0 - normalize(alts, 0.0, 10.0),
+        "capacity": normalize(capacity, 20.0, 140.0),
+        "free_flow_time": normalize(fft, 5.0, 120.0),
+        "bridge": 1.0 if is_crit else 0.0,
+    }
+    weighted = sum(IMPACT_WEIGHTS[name] * scores[name] for name in IMPACT_WEIGHTS)
+    return clamp01(weighted)
+
+
 def predict(u, v):
     model, G, od = load_artifacts()
 
     if not G.has_edge(u, v):
         return {"error": f"Edge {u}->{v} does not exist"}
 
-    data     = G[u][v]
+    data = first_edge_data(G, u, v)
     capacity = data.get("capacity", 20)
-    fft      = data.get("weight", 30.0)
-    traffic  = np.random.uniform(0.5, 1.5)
+    fft = data.get("weight", 30.0)
+    traffic = stable_traffic_multiplier(u, v)
 
     try:
         cent_dict = nx.edge_betweenness_centrality(G, weight="weight", normalized=True)
@@ -80,40 +145,42 @@ def predict(u, v):
     bridges = set(nx.bridges(G))
     is_crit = 1 if (u, v) in bridges or (v, u) in bridges else 0
 
-    features = np.array([[traffic, capacity, fft, cent, alts, is_crit, 1.0]])
+    features = np.array([[traffic, capacity, fft, cent, alts, is_crit, TIME_COEFF]])
 
     try:
-        impact = float(model.predict(features)[0])
+        model_impact = float(model.predict(features)[0])
     except Exception:
-        # Fallback for v1 model (5 features)
         features_v1 = np.array([[traffic, capacity, fft, cent, alts]])
-        impact = float(model.predict(features_v1)[0])
+        model_impact = float(model.predict(features_v1)[0])
 
-    impact = max(impact, 0.0)
+    impact = calculate_adjusted_impact(
+        model_impact, traffic, capacity, fft, cent, alts, bool(is_crit)
+    )
 
-    if impact < 0.1:
-        recommendation = "Not critical — can be repurposed"
-    elif impact < 0.3:
-        recommendation = "Moderate importance — requires analysis"
+    if impact < 0.18:
+        recommendation = "Not critical - can be repurposed"
+    elif impact < 0.38:
+        recommendation = "Moderate importance - requires analysis"
     else:
-        recommendation = "Critical — changes not recommended"
+        recommendation = "Critical - changes not recommended"
 
     return {
-        "edge":           f"{u} -> {v}",
-        "impact":         round(impact, 4),
+        "edge": f"{u} -> {v}",
+        "impact": round(impact, 4),
         "impact_percent": round(impact * 100, 1),
+        "model_impact": round(clamp01(model_impact), 4),
         "recommendation": recommendation,
-        "is_bridge":      bool(is_crit),
-        "centrality":     round(cent, 4),
-        "alternatives":   alts,
-        "traffic":        round(traffic, 2),
+        "is_bridge": bool(is_crit),
+        "centrality": round(cent, 4),
+        "alternatives": alts,
+        "traffic": round(traffic, 2),
     }
 
 
 def main():
     parser = argparse.ArgumentParser(description="Road impact CLI")
     parser.add_argument("--from", dest="u", type=int)
-    parser.add_argument("--to",   dest="v", type=int)
+    parser.add_argument("--to", dest="v", type=int)
     parser.add_argument("--list-edges", action="store_true")
     args = parser.parse_args()
 
@@ -138,10 +205,12 @@ def main():
 
     print(f"\nEdge: {result['edge']}")
     print(f"Impact: +{result['impact_percent']}%")
+    print(f"Model estimate: {result['model_impact'] * 100:.1f}%")
     print(f"Recommendation: {result['recommendation']}")
     print(f"Bridge: {result['is_bridge']}")
     print(f"Centrality: {result['centrality']}")
     print(f"Alternatives: {result['alternatives']}")
+    print(f"Traffic: {result['traffic']}x")
 
 
 if __name__ == "__main__":
