@@ -75,6 +75,28 @@ def graph_has_geo_coordinates(graph):
     return all("x" in graph.nodes[n] and "y" in graph.nodes[n] for n in graph.nodes())
 
 
+def graph_session_signature(graph, graph_edges):
+    sample_edges = graph_edges[:10] + graph_edges[-10:]
+    return (
+        graph.number_of_nodes(),
+        graph.number_of_edges(),
+        tuple((str(u), str(v)) for u, v in sample_edges),
+    )
+
+
+def get_session_input_data(graph, graph_edges):
+    signature = graph_session_signature(graph, graph_edges)
+    if st.session_state.get("impact_data_signature") != signature:
+        st.session_state["impact_data_signature"] = signature
+        st.session_state["impact_data"] = {
+            "traffic_by_edge": {
+                (u, v): float(np.random.uniform(0.5, 1.5) * TIME_COEFF)
+                for u, v in graph_edges
+            }
+        }
+    return st.session_state["impact_data"]
+
+
 def render_astana_osm_map(graph, graph_edges, labels, critical_edges, selected_edge):
     map_edges = []
     bounds_points = []
@@ -221,6 +243,7 @@ node_list    = list(G.nodes())
 edges        = list(G.edges())
 critical_set = set(tuple(sorted(e)) for e in bridges)
 node_label, label_to_node = make_node_labels(node_list)
+session_input_data = get_session_input_data(G, edges)
 
 st.caption(
     f"Graph: {graph_label}  |  Model: {model_label}  |  "
@@ -310,7 +333,7 @@ with col2:
             data     = first_edge_data(G, sel_u, sel_v)
             capacity = data.get("capacity", 20)
             fft      = data.get("weight", 30.0)
-            traffic  = np.random.uniform(0.5, 1.5) * TIME_COEFF
+            traffic  = session_input_data["traffic_by_edge"][(sel_u, sel_v)]
 
             try:
                 cent_dict = nx.edge_betweenness_centrality(
