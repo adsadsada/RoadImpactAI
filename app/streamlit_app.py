@@ -1,4 +1,5 @@
 import streamlit as st
+import streamlit.components.v1 as components
 import networkx as nx
 import numpy as np
 import pandas as pd
@@ -7,6 +8,7 @@ import string
 import pickle
 import sys
 import os
+import json
 
 sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
@@ -19,6 +21,7 @@ FEATURE_COLS = [
 # Time-of-day selection was removed: a road that is critical at peak hour
 # cannot be repurposed just because it is quiet at night.
 TIME_COEFF = 1.3
+ASTANA_CENTER = [51.1694, 71.4491]
 
 
 def make_node_labels(node_list):
@@ -39,6 +42,119 @@ def make_node_labels(node_list):
         labels[node] = label
     inverse = {v: k for k, v in labels.items()}
     return labels, inverse
+
+
+def first_edge_data(graph, u, v):
+    data = graph.get_edge_data(u, v, default={})
+    if not isinstance(data, dict):
+        return {}
+    if any(key in data for key in ("geometry", "weight", "capacity", "length")):
+        return data
+    for value in data.values():
+        if isinstance(value, dict):
+            return value
+    return data
+
+
+def edge_latlon_path(graph, u, v):
+    if not all("x" in graph.nodes[n] and "y" in graph.nodes[n] for n in (u, v)):
+        return None
+
+    data = first_edge_data(graph, u, v)
+    geometry = data.get("geometry")
+    if geometry is not None and hasattr(geometry, "coords"):
+        return [[lat, lon] for lon, lat in geometry.coords]
+
+    return [
+        [graph.nodes[u]["y"], graph.nodes[u]["x"]],
+        [graph.nodes[v]["y"], graph.nodes[v]["x"]],
+    ]
+
+
+def graph_has_geo_coordinates(graph):
+    return all("x" in graph.nodes[n] and "y" in graph.nodes[n] for n in graph.nodes())
+
+
+def render_astana_osm_map(graph, graph_edges, labels, critical_edges, selected_edge):
+    map_edges = []
+    bounds_points = []
+
+    for u, v in graph_edges:
+        coords = edge_latlon_path(graph, u, v)
+        if not coords:
+            continue
+        is_critical = tuple(sorted((u, v))) in critical_edges
+        map_edges.append({
+            "coords": coords,
+            "critical": is_critical,
+            "selected": (u, v) == selected_edge,
+            "label": f"{labels[u]} -> {labels[v]}" + (" [critical]" if is_critical else ""),
+        })
+        bounds_points.extend(coords)
+
+    if bounds_points:
+        center = [
+            sum(point[0] for point in bounds_points) / len(bounds_points),
+            sum(point[1] for point in bounds_points) / len(bounds_points),
+        ]
+        zoom = 12
+    else:
+        center = ASTANA_CENTER
+        zoom = 11
+
+    payload = json.dumps({
+        "center": center,
+        "zoom": zoom,
+        "edges": map_edges,
+    })
+
+    html = """
+    <link
+      rel="stylesheet"
+      href="https://unpkg.com/leaflet@1.9.4/dist/leaflet.css"
+      integrity="sha256-p4NxAoJBhIINfQPDmJOSiGakgVbM9h9G17Cf9Iibn4A="
+      crossorigin=""
+    />
+    <script
+      src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js"
+      integrity="sha256-20nQCchB9co0qIjJZRGuk2/Z9VM+kNiyxNV1lvTlZBo="
+      crossorigin=""
+    ></script>
+    <div id="astana-map" style="height: 620px; width: 100%; border-radius: 8px; overflow: hidden;"></div>
+    <script>
+      const data = __MAP_DATA__;
+      const map = L.map('astana-map', { preferCanvas: true }).setView(data.center, data.zoom);
+
+      L.tileLayer('https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png', {
+        maxZoom: 19,
+        attribution: '&copy; OpenStreetMap contributors'
+      }).addTo(map);
+
+      const layerGroup = L.featureGroup().addTo(map);
+      let selectedLayer = null;
+
+      data.edges.forEach((edge) => {
+        const style = {
+          color: edge.selected ? '#f1c40f' : (edge.critical ? '#c0392b' : '#2f80ed'),
+          weight: edge.selected ? 7 : (edge.critical ? 4 : 2),
+          opacity: edge.selected ? 1 : (edge.critical ? 0.9 : 0.55)
+        };
+        const line = L.polyline(edge.coords, style).bindTooltip(edge.label);
+        line.addTo(layerGroup);
+        if (edge.selected) {
+          selectedLayer = line;
+        }
+      });
+
+      if (selectedLayer) {
+        map.fitBounds(selectedLayer.getBounds(), { padding: [80, 80], maxZoom: 16 });
+      } else if (layerGroup.getLayers().length > 0) {
+        map.fitBounds(layerGroup.getBounds(), { padding: [30, 30], maxZoom: 13 });
+      }
+    </script>
+    """.replace("__MAP_DATA__", payload)
+
+    components.html(html, height=640)
 
 
 st.set_page_config(page_title="Road Impact AI", layout="wide")
@@ -134,37 +250,8 @@ with st.sidebar:
 col1, col2 = st.columns([1.5, 1])
 
 with col1:
-    st.subheader("Road Network")
+    st.subheader("Astana OpenStreetMap")
 
-    fig, ax = plt.subplots(figsize=(9, 7))
-
-    # Use real geographic coordinates when available
-    if all("x" in G.nodes[n] and "y" in G.nodes[n] for n in G.nodes()):
-        pos = {n: (G.nodes[n]["x"], G.nodes[n]["y"]) for n in G.nodes()}
-    else:
-        pos = nx.spring_layout(G, seed=42, k=1.5)
-
-    normal_e   = [(u, v) for u, v in edges if tuple(sorted((u, v))) not in critical_set]
-    critical_e = [(u, v) for u, v in edges if tuple(sorted((u, v))) in critical_set]
-
-    nx.draw_networkx_nodes(G, pos, node_color="#AED6F1", node_size=120, ax=ax)
-    nx.draw_networkx_edges(G, pos, edgelist=normal_e,   edge_color="#808080", width=1.0, ax=ax)
-    nx.draw_networkx_edges(G, pos, edgelist=critical_e, edge_color="#C0392B", width=2.5, ax=ax)
-
-    # Draw alphabetic labels on nodes instead of raw OSM IDs
-    nx.draw_networkx_labels(
-        G, pos,
-        labels=node_label,
-        font_size=6,
-        font_color="#1a1a1a",
-        ax=ax,
-    )
-
-    ax.set_title("Red = bridge edges (critical).  Node letters match the dropdown below.")
-    ax.axis("off")
-    st.pyplot(fig)
-
-    # Build dropdown options using alphabetic labels
     def edge_option(u, v):
         la = node_label[u]
         lb = node_label[v]
@@ -180,6 +267,33 @@ with col1:
     )
     sel_u, sel_v = edges[selected_idx]
 
+    if graph_has_geo_coordinates(G):
+        render_astana_osm_map(G, edges, node_label, critical_set, (sel_u, sel_v))
+    else:
+        st.info("OpenStreetMap coordinates are unavailable, showing network layout instead.")
+        fig, ax = plt.subplots(figsize=(9, 7))
+        pos = nx.spring_layout(G, seed=42, k=1.5)
+
+        normal_e   = [(u, v) for u, v in edges if tuple(sorted((u, v))) not in critical_set]
+        critical_e = [(u, v) for u, v in edges if tuple(sorted((u, v))) in critical_set]
+
+        nx.draw_networkx_nodes(G, pos, node_color="#AED6F1", node_size=120, ax=ax)
+        nx.draw_networkx_edges(G, pos, edgelist=normal_e,   edge_color="#808080", width=1.0, ax=ax)
+        nx.draw_networkx_edges(G, pos, edgelist=critical_e, edge_color="#C0392B", width=2.5, ax=ax)
+        nx.draw_networkx_edges(G, pos, edgelist=[(sel_u, sel_v)], edge_color="#F1C40F", width=4.0, ax=ax)
+
+        nx.draw_networkx_labels(
+            G, pos,
+            labels=node_label,
+            font_size=6,
+            font_color="#1a1a1a",
+            ax=ax,
+        )
+
+        ax.set_title("Red = bridge edges (critical). Yellow = selected road.")
+        ax.axis("off")
+        st.pyplot(fig)
+
 with col2:
     st.subheader("Analysis")
 
@@ -193,7 +307,7 @@ with col2:
 
     if st.button("Calculate impact", type="primary"):
         with st.spinner("Running analysis..."):
-            data     = G[sel_u][sel_v]
+            data     = first_edge_data(G, sel_u, sel_v)
             capacity = data.get("capacity", 20)
             fft      = data.get("weight", 30.0)
             traffic  = np.random.uniform(0.5, 1.5) * TIME_COEFF
