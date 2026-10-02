@@ -13,8 +13,13 @@ Track: AI inDrive Gov
 - Interactive OpenStreetMap view in the Streamlit app.
 - Road-network overlay on top of the map, with critical bridge edges highlighted.
 - Astana map mode in the interface.
+- Exact road-segment selection instead of street-level selection.
+- Stable segment identifiers based on OSM metadata when available.
+- Map bounds limited to the road segments included in the loaded graph.
 - Session-stable traffic inputs: random traffic values are generated once per
   Streamlit session and reused on every `Calculate impact` click.
+- Updated impact coefficients: bridge status is a weighted factor, not a fixed
+  60% score.
 - Fallback network layout when geographic coordinates are unavailable.
 - Support for real OpenStreetMap artifacts and trained Random Forest models.
 
@@ -35,6 +40,43 @@ structural graph features without running a full simulation at inference time.
 
 The result is a score between 0 and 1, along with a recommendation:
 repurpose, analyze further, or leave unchanged.
+
+---
+
+## Exact OSM road-segment architecture
+
+A street name is not a reliable road identifier. In OpenStreetMap, one visible
+street is usually split into many ways and graph edges. For example, "Sain from
+Margulan Street to Abay Avenue" should be stored as a route segment, not as the
+whole street named Sain.
+
+Recommended segment identity:
+
+- `segment_id`: stable application ID.
+- `osmids`: one or more OSM way IDs that form the selected segment.
+- `node_sequence`: ordered OSM node IDs from the start intersection to the end
+  intersection.
+- `from_intersection`: OSM node nearest to the Sain / Margulan intersection.
+- `to_intersection`: OSM node nearest to the Sain / Abay intersection.
+- `geometry`: ordered polyline used by the map.
+- `features`: capacity, travel time, centrality, alternatives, traffic, and
+  bridge/connectivity flags used by the model.
+
+Selection flow for a real corridor:
+
+1. Find candidate OSM ways whose `name` matches the main street, for example
+   Sain.
+2. Find the nearest graph nodes to the two boundary intersections, for example
+   Margulan and Abay.
+3. Run shortest path between those boundary nodes while preferring ways with the
+   selected street name.
+4. Save the resulting ordered edge list as one logical road segment.
+5. Use that segment ID in the UI and calculations instead of selecting by street
+   name alone.
+
+The current app selects individual graph segments from the loaded road graph.
+After regenerating `graph_real.pkl`, the dropdown will also show preserved OSM
+metadata such as street name, OSM way ID, and length.
 
 ---
 
